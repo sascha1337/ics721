@@ -74,3 +74,13 @@ func RunGetClassError(t *testing.T, ctx sdk.Context, app *app.App, msgServer was
 
 	require.EqualError(t, err, expected)
 }
+
+func RunListChannels(t *testing.T, ctx sdk.Context, app *app.App, msgServer wasmtypes.MsgServer, accs []Account,
+	instantiateRes *wasmtypes.MsgInstantiateContractResponse, getOwnerMsgRaw []byte, expected_response string) {
+	escrow721Address := instantiateRes.Address
+
+	addr, _ := sdk.AccAddressFromBech32(escrow721Address)
+	result, _ := app.WasmKeeper.QuerySmart(
+		ctx, addr, getOwnerMsgRaw)
+	require.Equal(t, string(result), expected_response)
+}

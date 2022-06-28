@@ -8,6 +8,7 @@ import (
 
 	wasmkeeper "github.com/CosmWasm/wasmd/x/wasm/keeper"
 	wasmtypes "github.com/CosmWasm/wasmd/x/wasm/types"
+	wasmvmtypes "github.com/CosmWasm/wasmvm/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
@@ -210,6 +211,23 @@ func TestTransfer(t *testing.T) {
 	))
 	expected_response := string(fmt.Sprintf(`{"owner":"%s","approvals":[]}`, accs[1].Address.String()))
 	RunGetOwner(t, ctx, app, msgServer, accs, instantiateRes, getOwnerMsgRaw, expected_response)
+}
+
+func TestChannelConnect(t *testing.T) {
+	myChannel := wasmvmtypes.IBCChannel{Version: "my test channel"}
+	addr1, ctx, app, accs := LoadChain(t)
+	msgServer, _ := LoadICS721(t, addr1, ctx, app)
+	instantiateRes := InstantiateEscrow721(t, ctx, msgServer, accs)
+	myMsg := wasmvmtypes.IBCChannelConnectMsg{
+		OpenConfirm: &wasmvmtypes.IBCOpenConfirm{
+			Channel: myChannel,
+		},
+	}
+	contractAddr, _ := sdk.AccAddressFromBech32("")
+	_ = app.WasmKeeper.OnConnectChannel(ctx, contractAddr, myMsg)
+	listChannelsMsgRaw := []byte(fmt.Sprintf(escrow721ListChannelsTemplate))
+	expected_response := string(fmt.Sprintf(`{"list_channels":{}}`))
+	RunListChannels(t, ctx, app, msgServer, accs, instantiateRes, listChannelsMsgRaw, expected_response)
 }
 
 func TestSaveClass(t *testing.T) {

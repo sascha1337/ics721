@@ -72,4 +72,9 @@ var (
 			"class_id": "%s"}
 	}
 	`
+	escrow721ListChannelsTemplate = `
+	{
+		"list_channels": {}
+	}
+	`
 )
