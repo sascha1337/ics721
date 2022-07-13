@@ -1,6 +1,6 @@
 use cw20_ics20::ibc::Ics20Ack;
 use cw20_ics20::state::ChannelInfo;
-use cw721::Cw721ExecuteMsg;
+use cw721_ibc::Cw721ExecuteMsg;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -8,11 +8,11 @@ use cosmwasm_std::{
     attr, entry_point, from_binary, to_binary, Binary, DepsMut, Empty, Env, IbcBasicResponse,
     IbcChannel, IbcChannelCloseMsg, IbcChannelConnectMsg, IbcChannelOpenMsg, IbcEndpoint, IbcOrder,
     IbcPacket, IbcPacketAckMsg, IbcPacketReceiveMsg, IbcPacketTimeoutMsg, IbcReceiveResponse,
-    Reply, Response, SubMsg, SubMsgResult, WasmMsg,
+    SubMsg, WasmMsg,
 };
 
 use crate::error::{ContractError, Never};
-use crate::state::{CHANNEL_INFO, CHANNEL_STATE};
+use crate::state::{instantiate_escrow_contract, CHANNEL_INFO, CHANNEL_STATE};
 
 pub const ICS721_VERSION: &str = "ics721-1";
 pub const ICS721_ORDERING: IbcOrder = IbcOrder::Unordered;
@@ -89,21 +89,6 @@ fn ack_fail(err: String) -> Binary {
 
 const SEND_NFT_ID: u64 = 1338;
 
-#[cfg_attr(not(feature = "library"), entry_point)]
-pub fn reply(_deps: DepsMut, _env: Env, reply: Reply) -> Result<Response, ContractError> {
-    if reply.id != SEND_NFT_ID {
-        return Err(ContractError::UnknownReplyId { id: reply.id });
-    }
-    let res = match reply.result {
-        SubMsgResult::Ok(_) => Response::new(),
-        SubMsgResult::Err(err) => {
-            // encode an acknowledgement error
-            Response::new().set_data(ack_fail(err))
-        }
-    };
-    Ok(res)
-}
-
 // IBC entrypoint 1
 #[cfg_attr(not(feature = "library"), entry_point)]
 /// enforces ordering and versioning constraints
@@ -116,6 +101,30 @@ pub fn ibc_channel_open(
     Ok(())
 }
 
+/*
+OpenAck {
+    channel: IbcChannel,
+    counterparty_version: String,
+},
+
+pub struct IbcChannel {
+    pub endpoint: IbcEndpoint,
+    pub counterparty_endpoint: IbcEndpoint,
+    pub order: IbcOrder,
+    /// Note: in ibcv3 this may be "", in the IbcOpenChannel handshake messages
+    pub version: String,
+    /// The connection upon which this channel was created. If this is a multi-hop
+    /// channel, we only expose the first hop.
+    pub connection_id: String,
+}
+
+pub struct IbcEndpoint {
+    pub port_id: String,
+    pub channel_id: String,
+}
+
+*/
+
 // IBC entrypoint 2
 #[cfg_attr(not(feature = "library"), entry_point)]
 /// record the channel in CHANNEL_INFO
@@ -125,17 +134,23 @@ pub fn ibc_channel_connect(
     msg: IbcChannelConnectMsg,
 ) -> Result<IbcBasicResponse, ContractError> {
     // we need to check the counter party version in try and ack (sometimes here)
-    enforce_order_and_version(msg.channel(), msg.counterparty_version())?;
+    enforce_order_and_version(msg.channel(), msg.clone().counterparty_version())?;
 
-    let channel: IbcChannel = msg.into();
-    let info = ChannelInfo {
-        id: channel.endpoint.channel_id,
-        counterparty_endpoint: channel.counterparty_endpoint,
-        connection_id: channel.connection_id,
-    };
-    CHANNEL_INFO.save(deps.storage, &info.id, &info)?;
+    let channel: IbcChannel = msg.clone().into();
+    let result = instantiate_escrow_contract(deps.storage, _env, msg);
+    match result {
+        Ok(_) => {
+            let info = ChannelInfo {
+                id: channel.endpoint.channel_id,
+                counterparty_endpoint: channel.counterparty_endpoint,
+                connection_id: channel.connection_id,
+            };
+            CHANNEL_INFO.save(deps.storage, &info.id, &info)?;
 
-    Ok(IbcBasicResponse::default())
+            Ok(IbcBasicResponse::default())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn enforce_order_and_version(

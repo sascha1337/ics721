@@ -1,18 +1,21 @@
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
-    from_binary, to_binary, Addr, Binary, Deps, DepsMut, Env, IbcMsg, IbcQuery, MessageInfo, Order,
-    PortIdResponse, Response, StdResult,
+    from_binary, to_binary, Addr, DepsMut, Env, IbcMsg, MessageInfo, Reply, Response,
 };
 use cw2::set_contract_version;
-use cw20_ics20::msg::{ListChannelsResponse, PortResponse};
-use cw721::Cw721ReceiveMsg;
-use cw_utils::nonpayable;
+use cw721_ibc::Cw721ReceiveMsg;
+use cw_storage_plus::Item;
+use cw_utils::{nonpayable, parse_reply_instantiate_data, MsgInstantiateContractResponse};
 
-use crate::error::ContractError;
+use crate::error::{ContractError, ERROR_ESCROW_MAP_SAVE, ERROR_INSTANTIATE_ESCROW_REPLY};
 use crate::ibc::Ics721Packet;
-use crate::msg::{ChannelResponse, ExecuteMsg, InstantiateMsg, QueryMsg, TransferMsg};
-use crate::state::{Config, CHANNEL_INFO, CHANNEL_STATE, CONFIG};
+use crate::msg::{ExecuteMsg, InstantiateMsg, TransferMsg};
+use crate::state::{
+    Config, EscrowMetadata, CHANNEL_INFO, CONFIG, CURRENT_ESCROW_DATA, ESCROW_STORAGE_MAP,
+    INSTANTIATE_ESCROW721_REPLY_ID,
+};
+pub const ESCROW_ADDRESSES: Item<Addr> = Item::new("escrow_addresses");
 
 // version info for migration info
 const CONTRACT_NAME: &str = "crates.io:sg721-ics721";
@@ -32,6 +35,8 @@ pub fn instantiate(
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
     let cfg = Config {
         default_timeout: msg.default_timeout,
+        cw721_ibc_code_id: msg.cw721_ibc_code_id,
+        label: msg.label,
     };
     CONFIG.save(deps.storage, &cfg)?;
     Ok(Response::default())
@@ -84,7 +89,7 @@ pub fn execute_transfer(
 
     // build ics721 packet
     let packet = Ics721Packet::new(
-        env.contract.address.as_ref(),
+        &msg.class_id,
         None,
         msg.token_ids
             .iter()
@@ -119,67 +124,47 @@ pub fn execute_transfer(
     Ok(res)
 }
 
-// TODO: Alot of this query code is copy pasta.
-// Find a way to make it generic or put into a package.
+// Reply callback triggered from cw721 contract instantiation
 #[cfg_attr(not(feature = "library"), entry_point)]
-pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
-    match msg {
-        QueryMsg::Port {} => to_binary(&query_port(deps)?),
-        QueryMsg::ListChannels {} => to_binary(&query_list(deps)?),
-        QueryMsg::Channel { id } => to_binary(&query_channel(deps, id)?),
-        QueryMsg::Tokens {
-            channel_id,
-            class_id,
-        } => to_binary(&query_tokens(deps, channel_id, class_id)?),
+pub fn reply(deps: DepsMut, _env: Env, msg: Reply) -> Result<Response, ContractError> {
+    if msg.id != INSTANTIATE_ESCROW721_REPLY_ID {
+        return Err(ContractError::InvalidReplyID {});
     }
-}
+    let reply = parse_reply_instantiate_data(msg);
 
-fn query_port(deps: Deps) -> StdResult<PortResponse> {
-    let query = IbcQuery::PortId {}.into();
-    let PortIdResponse { port_id } = deps.querier.query(&query)?;
-    Ok(PortResponse { port_id })
-}
-
-fn query_list(deps: Deps) -> StdResult<ListChannelsResponse> {
-    let channels: StdResult<Vec<_>> = CHANNEL_INFO
-        .range(deps.storage, None, None, Order::Ascending)
-        .map(|r| r.map(|(_, v)| v))
-        .collect();
-    Ok(ListChannelsResponse {
-        channels: channels?,
-    })
-}
-
-pub fn query_channel(deps: Deps, id: String) -> StdResult<ChannelResponse> {
-    let info = CHANNEL_INFO.load(deps.storage, &id)?;
-    let _class_ids: StdResult<Vec<_>> = CHANNEL_STATE
-        .sub_prefix(&id)
-        .range(deps.storage, None, None, Order::Ascending)
-        .map(|r| {
-            let (class_id_token_id, _) = r?;
-            Ok(class_id_token_id.0)
-        })
-        .collect();
-
-    let class_ids_resp = _class_ids;
-    match class_ids_resp {
-        Ok(mut class_id_vec) => Ok(ChannelResponse {
-            info,
-            class_ids: {
-                class_id_vec.sort();
-                class_id_vec.dedup();
-                class_id_vec
-            },
+    match reply {
+        Ok(res) => match CURRENT_ESCROW_DATA.load(deps.storage) {
+            Ok(current_escrow_data) => {
+                store_escrow_data(deps, current_escrow_data.escrow_name, res)
+            }
+            Err(_) => Err(ContractError::InstantiateEscrow721Error {
+                msg: ERROR_INSTANTIATE_ESCROW_REPLY.to_string(),
+            }),
+        },
+        Err(_) => Err(ContractError::InstantiateEscrow721Error {
+            msg: ERROR_INSTANTIATE_ESCROW_REPLY.to_string(),
         }),
-        Err(msg) => Err(msg),
     }
 }
 
-// TODO: https://github.com/public-awesome/contracts/issues/59
-pub fn query_tokens(
-    _deps: Deps,
-    _channel_id: String,
-    _class_id: String,
-) -> StdResult<ChannelResponse> {
-    todo!()
+fn store_escrow_data(
+    deps: DepsMut,
+    escrow_name: String,
+    res: MsgInstantiateContractResponse,
+) -> Result<Response, ContractError> {
+    let escrow_address = Addr::unchecked(res.contract_address);
+    let escrow_metadata = EscrowMetadata {
+        contract_address: escrow_address,
+        is_active: true,
+    };
+    let storage_result = ESCROW_STORAGE_MAP.save(deps.storage, &escrow_name, &escrow_metadata);
+    match storage_result {
+        Ok(_) => Ok(Response::default().add_attribute(
+            "instantiate_escrow_address",
+            escrow_metadata.contract_address,
+        )),
+        Err(_) => Err(ContractError::InstantiateEscrow721Error {
+            msg: ERROR_ESCROW_MAP_SAVE.to_string(),
+        }),
+    }
 }

@@ -1,5 +1,5 @@
 use cw20_ics20::state::ChannelInfo;
-use cw721::Cw721ReceiveMsg;
+use cw721_ibc::Cw721ReceiveMsg;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 pub struct InstantiateMsg {
     // Default timeout for ics721 packets, specified in seconds
     pub default_timeout: u64,
+    pub cw721_ibc_code_id: u64,
+    pub label: String,
 }
 
 // This is the message we accept via Receive
